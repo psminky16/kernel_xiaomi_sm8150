@@ -7,10 +7,13 @@ ARCH := x86
 endif
 
 # always use the host compiler
-# Define variables on build script
+# HOSTCC should still be overwritten by build script if defined
 #HOSTAR	?= ar
 #HOSTCC	?= gcc
 #HOSTLD	?= ld
+HOSTAR	?= llvm-ar
+HOSTCC	?= clang
+HOSTLD	?= ld.lld
 
 AR	 = $(HOSTAR)
 CC	 = $(HOSTCC)
