@@ -132,7 +132,7 @@ ifneq ($(KBUILD_OUTPUT),)
 # check that the output directory actually exists
 saved-output := $(KBUILD_OUTPUT)
 KBUILD_OUTPUT := $(shell mkdir -p $(KBUILD_OUTPUT) && cd $(KBUILD_OUTPUT) \
-								&& /bin/pwd)
+								&& pwd)
 $(if $(KBUILD_OUTPUT),, \
      $(error failed to create output directory "$(saved-output)"))
 
@@ -361,31 +361,30 @@ HOST_LFS_CFLAGS := $(shell getconf LFS_CFLAGS 2>/dev/null)
 HOST_LFS_LDFLAGS := $(shell getconf LFS_LDFLAGS 2>/dev/null)
 HOST_LFS_LIBS := $(shell getconf LFS_LIBS 2>/dev/null)
 
-HOSTCC       = gcc
-HOSTCXX      = g++
+HOSTCC       = clang
+HOSTCXX      = clang++
 HOSTCFLAGS   := -Wall -Wmissing-prototypes -Wstrict-prototypes -O3 \
 		-fomit-frame-pointer -std=gnu89 -pipe $(HOST_LFS_CFLAGS)
 HOSTCXXFLAGS := -O3 $(HOST_LFS_CFLAGS)
 HOSTLDFLAGS  := $(HOST_LFS_LDFLAGS)
 HOST_LOADLIBES := $(HOST_LFS_LIBS)
 
-ifeq ($(shell $(HOSTCC) -v 2>&1 | grep -c "clang version"), 1)
-HOSTCFLAGS  += -Wno-unused-value -Wno-unused-parameter \
-		-Wno-missing-field-initializers
-endif
-
 # Make variables (CC, etc...)
-AS		= $(CROSS_COMPILE)as
-LD		= $(CROSS_COMPILE)ld
-CC		= $(CROSS_COMPILE)gcc
-LDGOLD		= $(CROSS_COMPILE)ld.gold
-CPP		= $(CC) -E
-AR		= $(CROSS_COMPILE)ar
-NM		= $(CROSS_COMPILE)nm
-STRIP		= $(CROSS_COMPILE)strip
-OBJCOPY		= $(CROSS_COMPILE)objcopy
-OBJDUMP		= $(CROSS_COMPILE)objdump
-AWK		= awk
+AS			= llvm-as
+LD			= ld.lld
+CC			= clang
+LDGOLD		= ld.gold
+CPP			= $(CC) -E
+AR			= llvm-ar
+NM			= llvm-nm
+STRIP		= llvm-strip
+OBJCOPY		= llvm-objcopy
+OBJDUMP		= llvm-objdump
+OBJSIZE		= llvm-size
+READELF		= llvm-readelf
+LEX			= flex
+YACC		= bison
+AWK			= awk
 GENKSYMS	= scripts/genksyms/genksyms
 INSTALLKERNEL  := installkernel
 DEPMOD		= depmod
@@ -398,7 +397,7 @@ CHECKFLAGS     := -D__linux__ -Dlinux -D__STDC__ -Dunix -D__unix__ \
 NOSTDINC_FLAGS  =
 CFLAGS_MODULE   =
 AFLAGS_MODULE   =
-LDFLAGS_MODULE  =
+LDFLAGS_MODULE  = --strip-debug
 CFLAGS_KERNEL	=
 AFLAGS_KERNEL	=
 LDFLAGS_vmlinux =
@@ -434,19 +433,21 @@ ifeq ($(CONFIG_EARLY_INIT),true)
 KBUILD_CFLAGS    += -DCONFIG_EARLY_SERVICES
 endif
 
+KBUILD_CFLAGS    += -Werror=vla
+
 KBUILD_CPPFLAGS := -D__KERNEL__
 KBUILD_AFLAGS_KERNEL :=
 KBUILD_CFLAGS_KERNEL :=
 KBUILD_AFLAGS_MODULE  := -DMODULE
 KBUILD_CFLAGS_MODULE  := -DMODULE
-KBUILD_LDFLAGS_MODULE := -T $(srctree)/scripts/module-common.lds
+KBUILD_LDFLAGS_MODULE = -T $(srctree)/scripts/module-common.lds $(if $(CONFIG_PROFILING),,-s)
 LDFLAGS :=
 GCC_PLUGINS_CFLAGS :=
 CLANG_FLAGS :=
 
 export ARCH SRCARCH CONFIG_SHELL HOSTCC HOSTCFLAGS CROSS_COMPILE AS LD CC
-export CPP AR NM STRIP OBJCOPY OBJDUMP HOSTLDFLAGS HOST_LOADLIBES
-export MAKE AWK GENKSYMS INSTALLKERNEL PERL PYTHON UTS_MACHINE
+export CPP AR NM STRIP OBJCOPY OBJDUMP OBJSIZE READELF HOSTLDFLAGS HOST_LOADLIBES
+export MAKE LEX YACC AWK GENKSYMS INSTALLKERNEL PERL PYTHON UTS_MACHINE
 export HOSTCXX HOSTCXXFLAGS LDFLAGS_MODULE CHECK CHECKFLAGS
 
 export KBUILD_CPPFLAGS NOSTDINC_FLAGS LINUXINCLUDE OBJCOPYFLAGS LDFLAGS
@@ -498,9 +499,12 @@ ifdef CONFIG_POLLY_CLANG
 KBUILD_CFLAGS += -mllvm -polly \
 		   -mllvm -polly-run-dce \
 		   -mllvm -polly-run-inliner \
-		   -mllvm -polly-opt-fusion=max \
+           -mllvm -polly-isl-arg=--no-schedule-serialize-sccs \
 		   -mllvm -polly-ast-use-context \
+           -mllvm -polly-detect-keep-going \
+		   -mllvm -polly-position=before-vectorizer \
 		   -mllvm -polly-vectorizer=stripmine \
+           -mllvm -polly-detect-profitability-min-per-loop-insts=40 \
 		   -mllvm -polly-invariant-load-hoisting
 endif
 ifneq ($(CROSS_COMPILE),)
@@ -521,7 +525,7 @@ CLANG_FLAGS	+= $(call cc-option, -Wno-misleading-indentation)
 CLANG_FLAGS	+= $(call cc-option, -Wno-bool-operation)
 CLANG_FLAGS	+= $(call cc-option, -Wno-unsequenced)
 KBUILD_CFLAGS	+= $(CLANG_FLAGS)
-KBUILD_AFLAGS	+= $(CLANG_FLAGS) -no-integrated-as
+KBUILD_AFLAGS	+= $(CLANG_FLAGS)
 export CLANG_FLAGS
 ifeq ($(ld-name),lld)
 KBUILD_CFLAGS += -fuse-ld=lld
@@ -693,8 +697,8 @@ LLVM_NM		:= llvm-nm
 export LLVM_AR LLVM_NM
 
 # Set O3 optimization level for LTO
+LDFLAGS		+= -O3
 LDFLAGS		+= --plugin-opt=O3
-
 endif
 
 # The arch Makefile can set ARCH_{CPP,A,C}FLAGS to override the default
@@ -736,7 +740,15 @@ ifeq ($(cc-name),gcc)
 KBUILD_CFLAGS	+= -mcpu=cortex-a76.cortex-a55 -mtune=cortex-a76.cortex-a55
 endif
 ifeq ($(cc-name),clang)
-KBUILD_CFLAGS	+= -mcpu=cortex-a55 -mtune=cortex-a55
+KBUILD_CFLAGS	+= $(call cc-option, -mcpu=cortex-a76 -mtune=cortex-a76)
+endif
+
+ifdef CONFIG_LTO_CLANG
+KBUILD_CFLAG	+= -fwhole-program-vtables
+endif
+ifdef CONFIG_INLINE_OPTIMIZATION
+KBUILD_CFLAGS	+= -mllvm -inline-threshold=2500
+KBUILD_CFLAGS	+= -mllvm -inlinehint-threshold=1500
 endif
 
 # Tell gcc to never replace conditional load with a non-conditional one
@@ -744,7 +756,7 @@ KBUILD_CFLAGS	+= $(call cc-option,--param=allow-store-data-races=0)
 KBUILD_CFLAGS	+= $(call cc-option,-fno-allow-store-data-races)
 
 # check for 'asm goto'
-ifeq ($(shell $(CONFIG_SHELL) $(srctree)/scripts/gcc-goto.sh $(CC) $(KBUILD_CFLAGS)), y)
+ifeq ($(call shell-cached,$(CONFIG_SHELL) $(srctree)/scripts/gcc-goto.sh $(CC) $(KBUILD_CFLAGS)), y)
 	KBUILD_CFLAGS += -DCC_HAVE_ASM_GOTO
 	KBUILD_AFLAGS += -DCC_HAVE_ASM_GOTO
 endif
@@ -900,19 +912,21 @@ endif
 ifdef CONFIG_LTO_CLANG
 ifdef CONFIG_THINLTO
 lto-clang-flags	:= -flto=thin
-LDFLAGS		+= --thinlto-cache-dir=.thinlto-cache
+LDFLAGS		+= --thinlto-cache-dir=$(extmod-prefix).thinlto-cache
 else
 lto-clang-flags	:= -flto
 endif
 lto-clang-flags += -fvisibility=default $(call cc-option, -fsplit-lto-unit)
 
 # Limit inlining across translation units to reduce binary size
-LD_FLAGS_LTO_CLANG := -mllvm -import-instr-limit=5
+LD_FLAGS_LTO_CLANG := -mllvm -import-instr-limit=60
 
 KBUILD_LDFLAGS += $(LD_FLAGS_LTO_CLANG)
 KBUILD_LDFLAGS_MODULE += $(LD_FLAGS_LTO_CLANG)
 
 KBUILD_LDFLAGS_MODULE += -T scripts/module-lto.lds
+
+KBUILD_LDS_MODULE += $(srctree)/scripts/module-lto.lds
 
 # allow disabling only clang LTO where needed
 DISABLE_LTO_CLANG := -fno-lto
@@ -965,7 +979,7 @@ export CC_FLAGS_SCS
 endif
 
 # arch Makefile may override CC so keep this after arch Makefile is included
-NOSTDINC_FLAGS += -nostdinc -isystem $(shell $(CC) -print-file-name=include)
+NOSTDINC_FLAGS += -nostdinc -isystem $(call shell-cached,$(CC) -print-file-name=include)
 CHECKFLAGS     += $(NOSTDINC_FLAGS)
 
 # warn about C99 declaration after statement
@@ -1472,7 +1486,6 @@ all: modules
 
 PHONY += modules
 modules: $(vmlinux-dirs) $(if $(KBUILD_BUILTIN),vmlinux) modules.builtin
-	$(Q)$(AWK) '!x[$$0]++' $(vmlinux-dirs:%=$(objtree)/%/modules.order) > $(objtree)/modules.order
 	@$(kecho) '  Building modules, stage 2.';
 	$(Q)$(MAKE) -f $(srctree)/scripts/Makefile.modpost
 
@@ -1501,7 +1514,6 @@ _modinst_:
 		rm -f $(MODLIB)/build ; \
 		ln -s $(CURDIR) $(MODLIB)/build ; \
 	fi
-	@cp -f $(objtree)/modules.order $(MODLIB)/
 	@cp -f $(objtree)/modules.builtin $(MODLIB)/
 	$(Q)$(MAKE) -f $(srctree)/scripts/Makefile.modinst
 
@@ -1551,7 +1563,7 @@ MRPROPER_FILES += .config .config.old .version .old_version \
 		  Module.symvers tags TAGS cscope* GPATH GTAGS GRTAGS GSYMS \
 		  signing_key.pem signing_key.priv signing_key.x509	\
 		  x509.genkey extra_certificates signing_key.x509.keyid	\
-		  signing_key.x509.signer vmlinux-gdb.py
+		  signing_key.x509.signer vmlinux-gdb.py .thinlto-cache
 
 # clean - Delete most, but leave enough to build external modules
 #
@@ -1787,7 +1799,7 @@ $(clean-dirs):
 	$(Q)$(MAKE) $(clean)=$(patsubst _clean_%,%,$@)
 
 clean:	rm-dirs := $(MODVERDIR)
-clean: rm-files := $(KBUILD_EXTMOD)/Module.symvers
+clean: rm-files := $(KBUILD_EXTMOD)/Module.symvers $(KBUILD_EXTMOD)/.thinlto-cache
 
 PHONY += help
 help:
@@ -1817,6 +1829,7 @@ clean: $(clean-dirs)
 		-o -name '.*.d' -o -name '.*.tmp' -o -name '*.mod.c' \
 		-o -name '*.symtypes' -o -name 'modules.order' \
 		-o -name modules.builtin -o -name '.tmp_*.o.*' \
+		-o -name .cache.mk \
 		-o -name '*.c.[012]*.*' \
 		-o -name '*.ll' \
 		-o -name '*.gcno' \
@@ -1961,8 +1974,7 @@ cmd_crmodverdir = $(Q)mkdir -p $(MODVERDIR) \
 
 # read all saved command lines
 
-targets := $(wildcard $(sort $(targets)))
-cmd_files := $(wildcard .*.cmd $(foreach f,$(targets),$(dir $(f)).$(notdir $(f)).cmd))
+cmd_files := $(wildcard .*.cmd $(foreach f,$(sort $(targets)),$(dir $(f)).$(notdir $(f)).cmd))
 
 ifneq ($(cmd_files),)
   $(cmd_files): ;	# Do not try to update included dependency files
